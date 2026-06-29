@@ -75,14 +75,31 @@ def read_logs() -> str:
 
 
 def classify_failures(logs: str) -> dict:
-    failures = {
-        "install": any(kw in logs.lower() for kw in ["no module named", "pip", "could not find", "requirement", "install: failure"]),
-        "lint":    any(kw in logs.lower() for kw in ["e1", "e2", "e3", "w1", "flake8", "pylint", "undefined name", "lint: failure"]),
-        "test":    any(kw in logs for kw in ["FAILED", "AssertionError", "1 failed"]) or any(kw in logs.lower() for kw in ["failed", "assertionerror", "pytest", "test: failure"]),
-        "docker":  any(kw in logs.lower() for kw in ["dockerfile", "docker", "build failed", "step", "runc", "docker: failure"]),
-    }
-    detected = [k for k, v in failures.items() if v]
-    return {"detected": detected, "raw": failures}
+    failures = []
+
+    if "INSTALL_STATUS=failure" in logs:
+        failures.append("install")
+    if "LINT_STATUS=failure" in logs:
+        failures.append("lint")
+    if "TEST_STATUS=failure" in logs:
+        failures.append("test")
+    if "DOCKER_STATUS=failure" in logs:
+        failures.append("docker")
+
+    if not failures:
+        lower = logs.lower()
+        if "assertionerror" in lower or "pytest" in lower:
+            failures.append("test")
+        elif "modulenotfounderror" in lower or "no module named" in lower:
+            failures.append("install")
+        elif "syntaxerror" in lower:
+            failures.append("lint")
+        elif "docker build" in lower:
+            failures.append("docker")
+        else:
+            failures.append("unknown")
+
+    return {"detected": failures}
 
 
 def parse_ai_response(raw_text: str) -> dict:
@@ -121,7 +138,7 @@ def analyse_with_claude(logs: str, failure_context: dict) -> dict:
         system=SYSTEM_PROMPT,
         messages=[{
             "role": "user",
-            "content": f"Pipeline failure detected. Failure types: {detected_types}\n\nLogs:\n{logs}\n\nRespond in JSON only."
+            "content": f"Only analyze stages marked as failure. Do not treat section names like INSTALL LOGS, LINT LOGS, TEST LOGS, DOCKER LOGS as failures.\n\nFailed stages: {detected_types}\n\nLogs:\n{logs}\n\nRespond in JSON only."
         }]
     )
     return parse_ai_response(response.content[0].text)
@@ -137,11 +154,15 @@ def analyse_with_gemini(logs: str, failure_context: dict) -> dict:
     # Trim logs to last 3000 chars — most relevant errors are at the end
     trimmed_logs = logs[-3000:] if len(logs) > 3000 else logs
 
-    combined_prompt = f"""You are a DevOps expert. Analyse these CI/CD pipeline logs and respond ONLY in valid JSON.
+    combined_prompt = f"""You are a DevOps CI/CD failure analysis assistant.
 
-Detected failure types: {detected_types}
+Important rule:
+Only analyze stages marked as failure. Do not treat section names like INSTALL LOGS, LINT LOGS, TEST LOGS, DOCKER LOGS as failures.
+If a stage status is success, do not suggest fixes for it.
 
-Logs:
+Detected failed stages: {detected_types}
+
+Pipeline logs:
 {trimmed_logs}
 
 Respond with ONLY this JSON structure, no other text:
@@ -291,7 +312,7 @@ def main():
     failure_context = classify_failures(logs)
     print(f"🔍 Detected failures: {failure_context['detected']}")
 
-    if not failure_context["detected"]:
+    if not failure_context["detected"] or failure_context["detected"] == ["unknown"]:
         print("✅ No failures detected — pipeline healthy.")
         if PR_NUMBER and PR_NUMBER != "None":
             post_pr_comment("## 🤖 Self-Healing CI/CD Agent\n\n✅ **No failures detected.** All checks passed!\n")

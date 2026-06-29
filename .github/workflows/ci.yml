@@ -22,54 +22,75 @@ jobs:
       - name: Install dependencies
         id: install
         run: |
-          pip install -r sample-app/requirements.txt
+          pip install -r sample-app/requirements.txt > install-output.txt 2>&1
         continue-on-error: true
 
       - name: Run lint check
         id: lint
         run: |
           pip install flake8
-          flake8 sample-app/ --max-line-length=120 --output-file=lint-output.txt || true
-          cat lint-output.txt
+          cd sample-app
+          flake8 . > ../lint-output.txt 2>&1
         continue-on-error: true
 
       - name: Run tests
-        id: test
+        id: tests
         run: |
           pip install pytest
-          cd sample-app && pytest tests/ -v 2>&1 | tee ../test-output.txt || echo "PYTEST_FAILED=true" >> ../test-output.txt
+          cd sample-app
+          pytest tests/ -v > ../test-output.txt 2>&1
         continue-on-error: true
 
       - name: Build Docker image
         id: docker
         run: |
-          docker build -t sample-app:${{ github.sha }} ./sample-app 2>&1 | tee docker-output.txt
+          docker build -t self-healing-demo ./sample-app > docker-output.txt 2>&1
         continue-on-error: true
 
       - name: Combine all logs
         if: always()
         run: |
-          echo "=== INSTALL LOGS ===" > combined-logs.txt
-          cat lint-output.txt >> combined-logs.txt 2>/dev/null || echo "No install logs" >> combined-logs.txt
-          echo "=== LINT LOGS ===" >> combined-logs.txt
-          cat lint-output.txt >> combined-logs.txt 2>/dev/null || echo "No lint logs" >> combined-logs.txt
-          echo "=== TEST LOGS ===" >> combined-logs.txt
-          cat test-output.txt >> combined-logs.txt 2>/dev/null || echo "No test logs" >> combined-logs.txt
-          echo "=== DOCKER LOGS ===" >> combined-logs.txt
-          cat docker-output.txt >> combined-logs.txt 2>/dev/null || echo "No docker logs" >> combined-logs.txt
-          echo "=== STEP OUTCOMES ===" >> combined-logs.txt
-          echo "install: ${{ steps.install.outcome }}" >> combined-logs.txt
-          echo "lint: ${{ steps.lint.outcome }}" >> combined-logs.txt
-          echo "test: ${{ steps.test.outcome }}" >> combined-logs.txt
-          echo "docker: ${{ steps.docker.outcome }}" >> combined-logs.txt
+          echo "PIPELINE STEP STATUS" > combined-logs.txt
+          echo "INSTALL_STATUS=${{ steps.install.outcome }}" >> combined-logs.txt
+          echo "LINT_STATUS=${{ steps.lint.outcome }}" >> combined-logs.txt
+          echo "TEST_STATUS=${{ steps.tests.outcome }}" >> combined-logs.txt
+          echo "DOCKER_STATUS=${{ steps.docker.outcome }}" >> combined-logs.txt
 
-          
+          echo "" >> combined-logs.txt
+          echo "===== INSTALL LOGS =====" >> combined-logs.txt
+          cat install-output.txt >> combined-logs.txt 2>/dev/null || echo "No install logs" >> combined-logs.txt
+
+          echo "" >> combined-logs.txt
+          echo "===== LINT LOGS =====" >> combined-logs.txt
+          cat lint-output.txt >> combined-logs.txt 2>/dev/null || echo "No lint logs" >> combined-logs.txt
+
+          echo "" >> combined-logs.txt
+          echo "===== TEST LOGS =====" >> combined-logs.txt
+          cat test-output.txt >> combined-logs.txt 2>/dev/null || echo "No test logs" >> combined-logs.txt
+
+          echo "" >> combined-logs.txt
+          echo "===== DOCKER LOGS =====" >> combined-logs.txt
+          cat docker-output.txt >> combined-logs.txt 2>/dev/null || echo "No docker logs" >> combined-logs.txt
+
       - name: Upload combined logs
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: combined-logs
           path: combined-logs.txt
+
+      - name: Fail build if any critical step failed
+        if: always()
+        run: |
+          if [ "${{ steps.install.outcome }}" = "failure" ] || \
+             [ "${{ steps.lint.outcome }}" = "failure" ] || \
+             [ "${{ steps.tests.outcome }}" = "failure" ] || \
+             [ "${{ steps.docker.outcome }}" = "failure" ]; then
+            echo "One or more build steps failed"
+            exit 1
+          else
+            echo "All build steps passed"
+          fi
 
   self-healing-agent:
     runs-on: ubuntu-latest
