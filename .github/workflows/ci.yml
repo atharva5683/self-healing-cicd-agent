@@ -35,11 +35,12 @@ jobs:
 
       - name: Run tests
         id: tests
+        if: always()
+        continue-on-error: true
         run: |
           pip install pytest
           cd sample-app
-          pytest tests/ -v > ../test-output.txt 2>&1
-        continue-on-error: true
+          pytest tests/ -v > "$GITHUB_WORKSPACE/test-output.txt" 2>&1
 
       - name: Build Docker image
         id: docker
@@ -66,11 +67,19 @@ jobs:
 
           echo "" >> combined-logs.txt
           echo "===== TEST LOGS =====" >> combined-logs.txt
-          cat test-output.txt >> combined-logs.txt 2>/dev/null || echo "No test logs" >> combined-logs.txt
+          cat "$GITHUB_WORKSPACE/test-output.txt" >> combined-logs.txt 2>/dev/null || echo "No test logs found" >> combined-logs.txt
 
           echo "" >> combined-logs.txt
           echo "===== DOCKER LOGS =====" >> combined-logs.txt
           cat docker-output.txt >> combined-logs.txt 2>/dev/null || echo "No docker logs" >> combined-logs.txt
+
+      - name: Debug log files
+        if: always()
+        run: |
+          echo "Files in workspace:"
+          ls -la
+          echo "Test output:"
+          cat test-output.txt || echo "test-output.txt missing"
 
       - name: Upload combined logs
         uses: actions/upload-artifact@v4
