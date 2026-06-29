@@ -144,6 +144,31 @@ def analyse_with_claude(logs: str, failure_context: dict) -> dict:
     return parse_ai_response(response.content[0].text)
 
 
+def extract_failed_stage_logs(logs: str, failed_stages: list) -> str:
+    stage_headers = {
+        "install": "===== INSTALL LOGS =====",
+        "lint":    "===== LINT LOGS =====",
+        "test":    "===== TEST LOGS =====",
+        "docker":  "===== DOCKER LOGS =====",
+    }
+    all_headers = list(stage_headers.values())
+    extracted = []
+
+    for stage in failed_stages:
+        header = stage_headers.get(stage)
+        if not header or header not in logs:
+            continue
+        start = logs.find(header)
+        end = len(logs)
+        for next_header in all_headers:
+            pos = logs.find(next_header, start + len(header))
+            if pos != -1:
+                end = min(end, pos)
+        extracted.append(logs[start:end].strip())
+
+    return "\n\n".join(extracted) if extracted else logs
+
+
 def analyse_with_gemini(logs: str, failure_context: dict) -> dict:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY environment variable not set.")
@@ -151,8 +176,8 @@ def analyse_with_gemini(logs: str, failure_context: dict) -> dict:
     detected_types = ", ".join(failure_context["detected"]) or "unknown"
     print(f"🤖 Sending logs to Google Gemini (detected: {detected_types})...")
 
-    # Trim logs to last 3000 chars — most relevant errors are at the end
-    trimmed_logs = logs[-3000:] if len(logs) > 3000 else logs
+    failed_logs = extract_failed_stage_logs(logs, failure_context["detected"])
+    trimmed_logs = failed_logs[-8000:] if len(failed_logs) > 8000 else failed_logs
 
     combined_prompt = f"""You are a DevOps CI/CD failure analysis assistant.
 
@@ -168,7 +193,7 @@ Pipeline logs:
 Respond with ONLY this JSON structure, no other text:
 {{
   "severity": "high",
-  "failure_types": {json.dumps(detected_types)},
+  "failure_types": {json.dumps(failure_context["detected"])},
   "root_cause": "one paragraph explanation",
   "fixes": [
     {{"type": "test", "title": "fix title", "description": "what to do", "code": "command if applicable"}}
