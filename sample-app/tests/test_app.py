@@ -32,3 +32,9 @@ def test_health_returns_version(client):
     response = client.get("/health")
     data = response.get_json()
     assert "version" in data
+
+
+def test_deliberate_failure(client):
+    """This test is intentionally broken to trigger the self-healing agent."""
+    response = client.get("/nonexistent-endpoint")
+    assert response.status_code == 200  # Will fail — endpoint doesn't exist
