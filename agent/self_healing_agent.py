@@ -20,6 +20,7 @@ Author: Ayushi Vasishtha
 import os
 import sys
 import json
+import re
 import requests
 from typing import Optional
 
@@ -72,6 +73,84 @@ def read_logs() -> str:
             content = "...[truncated]...\n" + content[-8000:]
         return content
     return "No log file found — pipeline may have failed before log collection."
+
+
+# ── Secret Redaction Patterns ─────────────────────────────────────
+# Each tuple: (compiled_regex, replacement_label)
+_REDACTION_PATTERNS = [
+    # ── Platform-specific tokens ──────────────────────────────────
+    # GitHub personal access tokens (classic & fine-grained)
+    (re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}"), "[REDACTED_GITHUB_TOKEN]"),
+    # GitHub OAuth / App tokens
+    (re.compile(r"gho_[A-Za-z0-9]{36,}"), "[REDACTED_GITHUB_OAUTH]"),
+    # AWS Access Key IDs
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED_AWS_KEY]"),
+    # AWS Secret Access Keys (40 char base64-ish)
+    (re.compile(r"(?<=[=:\s'\"])[A-Za-z0-9/+=]{40}(?=[\s'\"\n])"), "[REDACTED_AWS_SECRET]"),
+    # Slack tokens  (xoxb-, xoxp-, xoxo-, xapp-)
+    (re.compile(r"xox[bpoa]-[A-Za-z0-9\-]{10,}"), "[REDACTED_SLACK_TOKEN]"),
+    # Anthropic API keys
+    (re.compile(r"sk-ant-[A-Za-z0-9\-_]{20,}"), "[REDACTED_ANTHROPIC_KEY]"),
+    # OpenAI API keys
+    (re.compile(r"sk-[A-Za-z0-9]{20,}"), "[REDACTED_OPENAI_KEY]"),
+    # Google API keys (AIzaSy...)
+    (re.compile(r"AIzaSy[A-Za-z0-9\-_]{33}"), "[REDACTED_GOOGLE_API_KEY]"),
+    # npm tokens
+    (re.compile(r"npm_[A-Za-z0-9]{36,}"), "[REDACTED_NPM_TOKEN]"),
+    # Heroku API keys
+    (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE), "[REDACTED_UUID_OR_HEROKU_KEY]"),
+
+    # ── Generic credential patterns ───────────────────────────────
+    # Bearer tokens in headers
+    (re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*", re.IGNORECASE), "Bearer [REDACTED_TOKEN]"),
+    # Basic auth header (base64 encoded user:pass)
+    (re.compile(r"Basic\s+[A-Za-z0-9+/=]{10,}", re.IGNORECASE), "Basic [REDACTED_CREDENTIALS]"),
+    # Authorization headers with generic tokens
+    (re.compile(r"(Authorization:\s*)[^\n]+", re.IGNORECASE), r"\1[REDACTED_AUTH_HEADER]"),
+
+    # ── Private key blocks ────────────────────────────────────────
+    (re.compile(
+        r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
+    ), "[REDACTED_PRIVATE_KEY]"),
+
+    # ── JWT tokens (header.payload.signature) ─────────────────────
+    (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), "[REDACTED_JWT]"),
+
+    # ── Connection strings / DSNs ─────────────────────────────────
+    # postgres://user:pass@host, mysql://user:pass@host, etc.
+    (re.compile(r"(postgres|mysql|mongodb|redis|amqp|smtp)://[^\s]+", re.IGNORECASE), "[REDACTED_CONNECTION_STRING]"),
+
+    # ── Generic key=value secrets ─────────────────────────────────
+    # Catches patterns like: API_KEY=abc123..., secret="xyz...", token: 'abc...'
+    (re.compile(
+        r"(?i)(api[_-]?key|secret[_-]?key|access[_-]?key|private[_-]?key|auth[_-]?token|api[_-]?secret"
+        r"|client[_-]?secret|password|passwd|db[_-]?password|database[_-]?url|token)"
+        r"[\s]*[:=][\s]*['\"]?([A-Za-z0-9\-_./+=]{8,})['\"]?"
+    ), r"\1=[REDACTED_SECRET]"),
+]
+
+
+def redact_secrets(logs: str) -> str:
+    """Scrub sensitive values from pipeline logs before sending to AI.
+
+    Applies a curated set of regex patterns that match common secret
+    formats (API keys, tokens, passwords, private keys, JWTs,
+    connection strings, etc.) and replaces them with safe placeholder
+    labels.  This ensures no credentials are leaked to third-party
+    AI providers during analysis.
+    """
+    redacted = logs
+    redaction_count = 0
+    for pattern, replacement in _REDACTION_PATTERNS:
+        redacted, n = pattern.subn(replacement, redacted)
+        redaction_count += n
+
+    if redaction_count > 0:
+        print(f"🔒 Redacted {redaction_count} potential secret(s) from logs.")
+    else:
+        print("🔒 No secrets detected in logs (redaction scan complete).")
+
+    return redacted
 
 
 def classify_failures(logs: str) -> dict:
@@ -333,6 +412,10 @@ def main():
 
     logs = read_logs()
     print(f"📄 Logs loaded ({len(logs)} characters)")
+
+    # ── Security: scrub secrets before any downstream processing ──
+    logs = redact_secrets(logs)
+    print(f"🔒 Logs sanitised ({len(logs)} characters after redaction)")
 
     failure_context = classify_failures(logs)
     print(f"🔍 Detected failures: {failure_context['detected']}")
